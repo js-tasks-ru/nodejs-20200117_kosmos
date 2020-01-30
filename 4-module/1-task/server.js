@@ -14,6 +14,7 @@ server.on("request", (req, res) => {
   if (path.parse(filepath).dir !== pulicDir) {
     res.statusCode = 400;
     res.end("Bad path");
+    return;
   }
 
   switch (req.method) {
