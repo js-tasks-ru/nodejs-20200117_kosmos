@@ -1,17 +1,19 @@
-const Koa = require('koa');
+const Koa = require("koa");
 const app = new Koa();
 
-app.use(require('koa-static')('public'));
-app.use(require('koa-bodyparser')());
+app.use(require("koa-static")("public"));
+app.use(require("koa-bodyparser")());
 
-const Router = require('koa-router');
+const Router = require("koa-router");
 const router = new Router();
 
-router.get('/subscribe', async (ctx, next) => {
-});
+// router.get('/', (ctx, next) => {
+//     const indexPage =
+// })
 
-router.post('/publish', async (ctx, next) => {
-});
+router.get("/subscribe", async (ctx, next) => {});
+
+router.post("/publish", async (ctx, next) => {});
 
 app.use(router.routes());
 
