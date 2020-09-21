@@ -1,34 +1,133 @@
-# Регистрация с подтверждением email
+# Регистрация с подтверждением email (Решение)
 
-В этой задаче вам необходимо реализовать API для регистрации пользователей. Процесс регистрации 
-состоит из 2 шагов: вначале пользователь вводит свои данные в поля формы и запрос с ними 
-отправляется на сервер, затем на указанный email приложение должно отправить ссылку для 
-подтверждения.
+## Процесс регистрации пользователя (обработка запроса `POST` на `/register`):
 
-Модель пользователя в очередной раз претерпела некоторые изменения, для хранения уникального токена,
-который и будет отправляться на указанную почту мы будем использовать поле `verificationToken`. 
-Логика такова: если в этом поле находится какое-то значение - email пользователя ожидает 
-подтверждения, если значения нет - пользователь подтвердил свой email.
+Первым делом при обработке запроса на регистрацию нам необходимо создать документ пользователя, 
+используя значения из полей тела запроса, а также добавив специальный токен, который будет 
+использоваться при подтверждении email.
+```js
+module.exports.register = async (ctx, next) => {
+  const verificationToken = uuid();
+  const user = new User({
+    email: ctx.request.body.email,
+    displayName: ctx.request.body.displayName,
+    verificationToken
+  });
+  
+  await user.setPassword(ctx.request.body.password);
+  await user.save();
+  
+  ctx.body = {status: 'ok'};
+};
+```
 
+Также, на данном этапе нашей задаче является отправка письма пользователю с ссылкой, содержащей 
+токен. Для этого можно воспользоваться функцией `sendMail`:
+```js
+module.exports.register = async (ctx, next) => {
+  const verificationToken = uuid();
+  const user = new User({
+    email: ctx.request.body.email,
+    displayName: ctx.request.body.displayName,
+    verificationToken,
+  });
+  
+  await user.setPassword(ctx.request.body.password);
+  await user.save();
+  
+  await sendMail({
+    template: 'confirmation',
+    locals: {token: verificationToken},
+    to: user.email,
+    subject: 'Подтвердите почту',
+  });
+  
+  ctx.body = {status: 'ok'};
+};
+```
 
-Задача сводится к следующему:
-1. При обработке запроса `POST /register` необходимо:
-    - сгенерировать токен с помощью библиотеки `uuid`
-    - создать новый документ пользователя, используя значения полей `email, displayName и password`
-    из запроса, а также использовать полученный ранее токен в качестве значения для поля 
-    `verificationToken`
-    - отправить на указанный пользователем email письмо с ссылкой вида 
-    `http://localhost:3000/confirm/${token}`
-2. Если пользователь уже есть в базе данных или указан невалидный email:
-    - сервер должен вернуть ошибку 400
-    - в теле ответа должен быть ключ `errors`, в котором перечислены все ошибки (например,
-    `{ errors: { email: 'Такой email уже существует' } }`).
-3. Если пользователь указал действительный email, то получив письмо он сможет перейти по ссылке в 
-нём и нам необходимо выполнить простую операцию:
-    - найти пользователя в базе по значению переданного токена, обновить документ удалив поле
-    `verificationToken`.
-    - аутентифицировать пользователя, сгенерировав для него новый ключ сесии (также, с помощью uuid)
-4. Если пользователь, который не подтвердил email пытается залогиниться с правильным паролем - 
-локальная стратегия должна возвращать ошибку "подтвердите email".
-5. Если пользователь делает запрос на `/confirm` с неправильным токеном - ему должна вернуться
-ошибка 400 - `{error: 'Ссылка подтверждения недействительна или устарела'}`.
+Не стоит забывать, что создание документа - операция, которая легко может завершиться ошибками
+валидации, в этом случае мы должны их обработать и вернуть пользователю в подходящем виде. Этим
+занимается middleware `handleMongooseValidationError`, который нам достаточно подключить:
+```js
+router.post('/register', handleMongooseValidationError, register);
+```
+
+## Подтверждение email (обработка `POST` запроса на `/confirm`)
+
+Логика обработки этого запроса достаточно проста: нам необходимо найти соответствующий документ
+в базе данных (используя значение поля `verificationToken`) и удалить это поле из базы, в ответ
+пользователю надо вернуть вновь сгенерированный токен.
+```js
+module.exports.confirm = async (ctx) => {
+  const user = await User.findOne({
+    verificationToken: ctx.request.body.verificationToken,
+  });
+  
+  user.verificationToken = undefined;
+  await user.save();
+  
+  const token = uuid();
+  
+  ctx.body = {token};
+};
+```
+*Обратите внимание, для удаления значения поля из базы его надо установить в `undefined`.*
+
+В данном случае не стоит также забывать о том, что пользователя может и не оказаться (допустим, 
+токен уже был использован для подтверждения раньше) - в этом случае мы должны вернуть ошибку:
+```js
+module.exports.confirm = async (ctx) => {
+  const user = await User.findOne({
+    verificationToken: ctx.request.body.verificationToken,
+  });
+  
+  if (!user) {
+    ctx.throw(400, 'Ссылка подтверждения недействительна или устарела');
+  }
+  
+  user.verificationToken = undefined;
+  await user.save();
+  
+  const token = uuid();
+  
+  ctx.body = {token};
+};
+```
+
+## Изменения в локальной стратегии
+
+Остался лишь небольшой нюанс, касающийся момента, когда пользователь пытается войти на сайт, не
+подтвердив свою почту: в этом случае мы должны вернуть ему ошибку. Сделать это нужно лишь в том
+случае, если пара `email:password` были переданы верно (то есть лишь после того, как мы убедимся в
+их правильности).
+```js
+const LocalStrategy = require('passport-local').Strategy;
+const User = require('../../models/User');
+
+module.exports = new LocalStrategy(
+  {usernameField: 'email', session: false},
+  async function(email, password, done) {
+    try {
+      const user = await User.findOne({email});
+      if (!user) {
+        return done(null, false, 'Нет такого пользователя');
+      }
+      
+      const isValidPassword = await user.checkPassword(password);
+      
+      if (!isValidPassword) {
+        return done(null, false, 'Невереный пароль');
+      }
+      
+      if (user.verificationToken) {
+        return done(null, false, 'Подтвердите email');
+      }
+      
+      return done(null, user);
+    } catch (err) {
+      done(err);
+    }
+  }
+);
+```
